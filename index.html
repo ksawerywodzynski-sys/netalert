@@ -31,6 +31,7 @@
 <div class="sub">Mist-net capture sensors. Tap Start, pick NetAlert, then keep this page open and the screen on.</div>
 <div id="msg"></div>
 <button id="start">Start listening</button>
+<button id="testsound" class="secondary">Test sound (3 s)</button>
 <button id="sim" class="secondary">Simulate a sensor (test the alarm)</button>
 <button id="silence" class="stop hidden">SILENCE ALARM</button>
 <div id="cards"></div>
@@ -100,30 +101,52 @@ function render() {
       `<span class="sub">last packet ${age}s ago · captures ${p.captures}${p.captured ? ' · peak ' + p.peak.toFixed(1) + ' m/s²' : ''}</span>`;
     $('cards').appendChild(d);
   }
-  const ringing = Date.now() >= silencedUntil && alarmUntil > Date.now();
+  const ringing = isRinging();
   document.body.classList.toggle('alarm', ringing);
   $('silence').classList.toggle('hidden', !(alarmUntil > Date.now()));
 }
 setInterval(render, 1000);
 
-// ---- Alarm sound (needs a user tap first to unlock audio on iOS) ----
-function unlockAudio() {
-  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
-  if (audio.state !== 'running') audio.resume();
-}
-function beep(freq) {
-  const o = audio.createOscillator(), g = audio.createGain();
-  o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.4;
-  o.connect(g); g.connect(audio.destination);
-  o.start(); o.stop(audio.currentTime + 0.35);
-}
-let tone = false;
-setInterval(() => {
-  if (audio && Date.now() >= silencedUntil && alarmUntil > Date.now()) {
-    beep((tone = !tone) ? 1800 : 1200);
-    if (navigator.vibrate) navigator.vibrate(300);
+// ---- Alarm sound ----
+// A looping <audio> element, not Web Audio: iOS mutes Web Audio when the ringer switch is silent,
+// but plays <audio> media. It must be started from a tap once to unlock it.
+function makeAlarmWav() {
+  const rate = 22050, secs = 1.0, n = Math.floor(rate * secs), buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const f = i < n / 2 ? 1800 : 1200;                       // two alternating tones
+    v.setInt16(44 + i * 2, (Math.sin(2 * Math.PI * f * i / rate) > 0 ? 1 : -1) * 0.8 * 32767, true);  // square wave
   }
-}, 450);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+const alarmAudio = new Audio(makeAlarmWav());
+alarmAudio.loop = true;
+alarmAudio.setAttribute('playsinline', '');
+let audioUnlocked = false;
+function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
+  if (audioUnlocked) return;
+  alarmAudio.play().then(() => { alarmAudio.pause(); alarmAudio.currentTime = 0; audioUnlocked = true; })
+    .catch((e) => { $('msg').textContent = 'Sound blocked: ' + e.message; });
+}
+function isRinging() { return Date.now() >= silencedUntil && alarmUntil > Date.now(); }
+setInterval(() => {
+  if (isRinging()) {
+    if (alarmAudio.paused) alarmAudio.play().catch(() => { $('msg').textContent = 'Tap "Test sound" to enable the alarm sound.'; });
+    if (navigator.vibrate) navigator.vibrate(300);
+  } else if (!alarmAudio.paused) {
+    alarmAudio.pause();
+  }
+}, 500);
+
+$('testsound').onclick = () => {
+  unlockAudio(); alarmAudio.currentTime = 0;
+  alarmAudio.play().then(() => setTimeout(() => { if (!isRinging()) alarmAudio.pause(); }, 3000))
+    .catch((e) => { $('msg').textContent = 'Sound blocked: ' + e.message; });
+};
 
 $('silence').onclick = () => { silencedUntil = Date.now() + SILENCE_S * 1000; alarmUntil = 0; log('alarm silenced'); render(); };
 
