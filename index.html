@@ -28,7 +28,7 @@
 </head>
 <body>
 <h1>NetAlert</h1>
-<div class="sub">Mist-net capture sensors. Keep this page open and the screen on.</div>
+<div class="sub">Mist-net capture sensors. Tap Start, pick NetAlert, then keep this page open and the screen on.</div>
 <div id="msg"></div>
 <button id="start">Start listening</button>
 <button id="sim" class="secondary">Simulate a sensor (test the alarm)</button>
@@ -133,25 +133,43 @@ async function keepAwake() {
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wakeLock) keepAwake(); });
 
+const SVC = '4e41ff00-9d11-4c7f-8a1b-5c7d2e6f0001';   // must match firmware/src/main.c
+const CHR = '4e41ff01-9d11-4c7f-8a1b-5c7d2e6f0001';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let device = null;
+
+// Connect and subscribe. The board sends the same 9-byte packet once a second while connected.
+async function connect() {
+  const server = await device.gatt.connect();
+  const chr = await (await server.getPrimaryService(SVC)).getCharacteristic(CHR);
+  chr.addEventListener('characteristicvaluechanged', (e) => { const p = parse(e.target.value); if (p) onPacket(p); });
+  await chr.startNotifications();
+  const first = parse(await chr.readValue());
+  if (first) onPacket(first);
+}
+
+async function reconnectLoop() {
+  while (device && !device.gatt.connected) {
+    try { await connect(); log('reconnected'); return; } catch (e) { await sleep(3000); }
+  }
+}
+
 $('start').onclick = async () => {
   unlockAudio(); keepAwake();
-  if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
-    $('msg').textContent = 'This browser cannot scan Bluetooth advertisements. On iPhone open this page in the Bluefy app.';
+  if (!navigator.bluetooth) {
+    $('msg').textContent = 'This browser has no Bluetooth. On iPhone open this page in the Bluefy app.';
     return;
   }
   try {
-    navigator.bluetooth.addEventListener('advertisementreceived', (e) => {
-      const dv = e.manufacturerData && e.manufacturerData.get(COMPANY_ID);
-      const p = dv && parse(dv);
-      if (p) onPacket(p);
-    });
-    await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'NetAlert' }], optionalServices: [SVC] });
+    device.addEventListener('gattserverdisconnected', () => { log('Bluetooth link dropped, reconnecting'); reconnectLoop(); });
+    await connect();
     $('msg').textContent = '';
-    $('start').textContent = 'Listening…';
+    $('start').textContent = 'Connected';
     $('start').disabled = true;
-    log('scan started');
+    log('connected to ' + device.name);
   } catch (err) {
-    $('msg').textContent = 'Could not start scan: ' + err.message;
+    $('msg').textContent = 'Could not connect: ' + err.message;
   }
 };
 
