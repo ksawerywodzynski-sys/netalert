@@ -21,6 +21,7 @@
   .card.lost, .card.unarmed { border-color:var(--warn); }
   .card b { font-size:18px; }
   .state { font-weight:600; }
+  canvas.chart { width:100%; height:130px; display:block; margin-top:8px; }
   #log { font:13px ui-monospace,monospace; color:var(--muted); white-space:pre-wrap; max-height:30vh; overflow:auto; }
   #msg { color:var(--warn); margin-bottom:10px; }
   .hidden { display:none; }
@@ -41,13 +42,16 @@
 // Packet format: must match firmware/src/main.c and receiver/protocol.py.
 const COMPANY_ID = 0xFFFF;
 const LOST_AFTER_S = 15;      // heartbeat is 1 s; BLE drops packets, 15 s of silence is a real problem
+const CHART_WINDOW_S = 300;   // chart shows the last 5 minutes
+const THRESHOLD_MPS2 = 1.0;   // must match DEVIATION_MPS2 in firmware/src/main.c
 const SILENCE_S = 60;         // alarm stays quiet this long after you tap Silence, unless a new event occurs
 
 function parse(dv) {
   if (dv.byteLength < 9 || dv.getUint8(0) !== 0x4E || dv.getUint8(1) !== 0x41) return null; // 'N','A'
   const flags = dv.getUint8(3);
   return { id: dv.getUint8(2), captured: !!(flags & 1), armed: !!(flags & 2),
-           heartbeat: dv.getUint16(4, true), captures: dv.getUint16(6, true), peak: dv.getUint8(8) / 10 };
+           heartbeat: dv.getUint16(4, true), captures: dv.getUint16(6, true), peak: dv.getUint8(8) / 10,
+           activity: dv.byteLength >= 10 ? dv.getUint8(9) / 10 : null };
 }
 
 const sensors = new Map();   // id -> {pkt, seen, lost, alarmedCapture}
@@ -70,6 +74,10 @@ function onPacket(p) {
   let s = sensors.get(p.id);
   if (!s) { s = { alarmedCapture: -1, lost: false }; sensors.set(p.id, s); log(`sensor ${p.id} found (armed=${p.armed})`); }
   s.pkt = p; s.seen = Date.now();
+  if (p.activity !== null) {
+    (s.hist = s.hist || []).push({ t: s.seen, v: p.activity, cap: p.captured });
+    while (s.hist.length && s.seen - s.hist[0].t > CHART_WINDOW_S * 1000) s.hist.shift();
+  }
   if (s.lost) { s.lost = false; log(`sensor ${p.id} back in range`); }
   if (p.captured && s.alarmedCapture !== p.captures) {
     s.alarmedCapture = p.captures;
@@ -100,12 +108,39 @@ function render() {
     d.innerHTML = `<b>Net ${id}</b> <span class="state">${state}</span><br>` +
       `<span class="sub">last packet ${age}s ago · captures ${p.captures}${p.captured ? ' · peak ' + p.peak.toFixed(1) + ' m/s²' : ''}</span>`;
     $('cards').appendChild(d);
+    if (s.hist && s.hist.length) {
+      const c = document.createElement('canvas'); c.className = 'chart'; d.appendChild(c);
+      drawChart(c, s.hist);
+    }
   }
   const ringing = isRinging();
   document.body.classList.toggle('alarm', ringing);
   $('silence').classList.toggle('hidden', !(alarmUntil > Date.now()));
 }
 setInterval(render, 1000);
+
+// Movement chart: max movement per second (m/s²) over the last 5 minutes, threshold line, capture shading.
+function drawChart(canvas, hist) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const fg = css.getPropertyValue('--muted').trim(), bad = css.getPropertyValue('--bad').trim(), ok = css.getPropertyValue('--ok').trim(), warn = css.getPropertyValue('--warn').trim();
+  const now = Date.now(), padL = 30, padB = 16, pw = w - padL - 4, ph = h - padB - 4;
+  const ymax = Math.max(3, Math.ceil(Math.max(...hist.map((q) => q.v)) * 1.15));
+  const X = (t) => padL + pw * (1 - (now - t) / (CHART_WINDOW_S * 1000));
+  const Y = (v) => 4 + ph * (1 - v / ymax);
+  g.font = '11px system-ui'; g.fillStyle = fg; g.strokeStyle = fg; g.lineWidth = 1;
+  g.fillText(ymax, 2, 12); g.fillText('0', 14, 4 + ph); g.fillText('-5 min', padL, h - 3); g.fillText('now', w - 26, h - 3);
+  g.globalAlpha = 0.25; g.beginPath(); g.moveTo(padL, 4 + ph); g.lineTo(w - 4, 4 + ph); g.stroke(); g.globalAlpha = 1;
+  g.strokeStyle = warn; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(padL, Y(THRESHOLD_MPS2)); g.lineTo(w - 4, Y(THRESHOLD_MPS2)); g.stroke(); g.setLineDash([]);
+  g.fillStyle = bad; g.globalAlpha = 0.18;
+  for (let i = 0; i < hist.length; i++) if (hist[i].cap) { const x0 = X(hist[i].t), x1 = i + 1 < hist.length ? X(hist[i + 1].t) : w - 4; g.fillRect(x0, 4, Math.max(2, x1 - x0), ph); }
+  g.globalAlpha = 1;
+  g.strokeStyle = ok; g.lineWidth = 1.5; g.beginPath();
+  hist.forEach((q, i) => { const x = X(q.t), y = Y(q.v); if (i === 0 || q.t - hist[i - 1].t > 3000) g.moveTo(x, y); else g.lineTo(x, y); });  // gap = no signal
+  g.stroke();
+}
 
 // ---- Alarm sound ----
 // A looping <audio> element, not Web Audio: iOS mutes Web Audio when the ringer switch is silent,
@@ -204,7 +239,8 @@ $('sim').onclick = () => {
   const t = setInterval(() => {
     beat++;
     const captured = beat >= 3 && beat <= 6;
-    onPacket({ id: 1, captured, armed: true, heartbeat: beat, captures: beat >= 3 ? 1 : 0, peak: captured ? 9.7 : 0 });
+    onPacket({ id: 1, captured, armed: true, heartbeat: beat, captures: beat >= 3 ? 1 : 0, peak: captured ? 9.7 : 0,
+               activity: captured ? 6 + Math.random() * 4 : 0.05 + Math.random() * 0.1 });
     if (beat === 8) clearInterval(t);
   }, 1000);
 };
