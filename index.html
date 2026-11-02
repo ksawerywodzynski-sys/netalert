@@ -3,85 +3,225 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1418">
 <title>NetAlert</title>
 <style>
-  :root { --bg:#10151a; --fg:#e8eef2; --muted:#8a98a3; --card:#1a222a; --ok:#2fbf71; --bad:#e5484d; --warn:#f5a524; }
-  @media (prefers-color-scheme: light) { :root { --bg:#f4f6f8; --fg:#14202a; --muted:#5b6b78; --card:#fff; } }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,-apple-system,sans-serif; }
-  body.alarm { animation: flash 0.8s steps(2) infinite; }
-  @keyframes flash { 50% { background:#5a0f12; } }
-  h1 { font-size:20px; margin:0 0 4px; }
-  .sub { color:var(--muted); font-size:14px; margin-bottom:16px; }
-  button { font:inherit; padding:14px 18px; border:0; border-radius:10px; background:#2d6cdf; color:#fff; width:100%; margin-bottom:10px; }
-  button.secondary { background:var(--card); color:var(--fg); border:1px solid var(--muted); }
-  button.stop { background:var(--bad); font-size:20px; padding:20px; }
-  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:10px; border-left:6px solid var(--ok); }
-  .card.captured { border-color:var(--bad); }
-  .card.lost, .card.unarmed { border-color:var(--warn); }
-  .card b { font-size:18px; }
-  .state { font-weight:600; }
-  canvas.chart { width:100%; height:130px; display:block; margin-top:8px; }
-  #log { font:13px ui-monospace,monospace; color:var(--muted); white-space:pre-wrap; max-height:30vh; overflow:auto; }
-  #msg { color:var(--warn); margin-bottom:10px; }
-  .hidden { display:none; }
+  :root {
+    --bg: #0e1418; --surface: #172028; --surface-2: #1f2a34; --line: #2b3945;
+    --fg: #eaf0f4; --muted: #8fa1ae;
+    --ok: #34c77b; --bad: #ff5a5f; --warn: #f5a524; --info: #4f9dff; --accent: #3b82f6;
+    --radius: 16px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f2f5f8; --surface: #ffffff; --surface-2: #e9eef3; --line: #d3dce4;
+      --fg: #14202a; --muted: #5d6f7d;
+      --ok: #1a9e5c; --bad: #d6343a; --warn: #c27c00; --info: #2563eb; --accent: #2563eb;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; color: var(--fg); background: var(--bg);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             calc(110px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    max-width: 560px; margin-inline: auto;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  h1 { font-size: 22px; letter-spacing: .2px; margin: 0; }
+  .pill { font-size: 13px; padding: 5px 11px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+  .pill.on { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+  .pill.wait { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+
+  .hero { border-radius: var(--radius); padding: 22px 18px; margin-bottom: 14px; background: var(--surface);
+          border: 1px solid var(--line); text-align: center; }
+  .hero .title { font-size: 28px; font-weight: 700; }
+  .hero .sub { color: var(--muted); margin-top: 4px; }
+  .hero.ok   { background: color-mix(in srgb, var(--ok) 14%, var(--surface));   border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+  .hero.ok .title { color: var(--ok); }
+  .hero.bad  { background: color-mix(in srgb, var(--bad) 20%, var(--surface));  border-color: var(--bad); }
+  .hero.bad .title { color: var(--bad); }
+  .hero.warn { background: color-mix(in srgb, var(--warn) 16%, var(--surface)); border-color: var(--warn); }
+  .hero.warn .title { color: var(--warn); }
+  .hero.info .title { color: var(--info); }
+  body.alarm .hero { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--bad) 35%, transparent); } }
+
+  .btn { font: inherit; font-weight: 600; min-height: 48px; padding: 0 18px; border-radius: 12px; border: 1px solid var(--line);
+         background: var(--surface); color: var(--fg); width: 100%; cursor: pointer; }
+  .btn:active { transform: scale(.985); }
+  .btn.primary { background: var(--accent); border-color: transparent; color: #fff; font-size: 17px; min-height: 54px; }
+  .btn:disabled { opacity: .55; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0 14px; }
+  #msg { color: var(--warn); margin: 0 0 10px; }
+  #msg:empty { display: none; }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 14px 10px;
+          margin-bottom: 12px; border-left: 5px solid var(--ok); }
+  .card.bad { border-left-color: var(--bad); } .card.warn { border-left-color: var(--warn); } .card.info { border-left-color: var(--info); }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .card-head b { font-size: 18px; }
+  .badge { font-size: 13px; font-weight: 700; }
+  .badge.ok { color: var(--ok); } .badge.bad { color: var(--bad); } .badge.warn { color: var(--warn); } .badge.info { color: var(--info); }
+  .meta { color: var(--muted); font-size: 14px; }
+  canvas.chart { width: 100%; height: 140px; display: block; margin-top: 8px; }
+
+  details.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 12px; }
+  details.panel summary { list-style: none; cursor: pointer; padding: 14px; font-weight: 600; display: flex; justify-content: space-between; }
+  details.panel summary::-webkit-details-marker { display: none; }
+  details.panel summary::after { content: "›"; color: var(--muted); transition: transform .15s; font-size: 20px; line-height: 1; }
+  details.panel[open] summary::after { transform: rotate(90deg); }
+  .panel-body { padding: 0 14px 14px; }
+  .panel-body label { display: flex; justify-content: space-between; margin: 12px 0 4px; }
+  .panel-body label span { font-weight: 700; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 32px; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .state { color: var(--muted); font-weight: 400; font-size: 13px; }
+  #log { font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted); white-space: pre-wrap; max-height: 34vh; overflow: auto; }
+
+  .alarmbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; background: var(--bad); color: #fff;
+              padding: 14px max(16px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+              display: flex; flex-direction: column; gap: 10px; box-shadow: 0 -6px 24px rgba(0,0,0,.4); }
+  .alarmbar[hidden] { display: none; }
+  .alarmbar .text { font-weight: 700; }
+  .alarmbar button { background: #fff; color: var(--bad); border: 0; border-radius: 12px; min-height: 56px; font: inherit; font-weight: 800; font-size: 19px; }
 </style>
 </head>
 <body>
-<h1>NetAlert</h1>
-<div class="sub">Mist-net capture sensors. Tap Start, pick NetAlert, then keep this page open and the screen on.</div>
-<div id="msg"></div>
-<button id="start">Start listening</button>
-<button id="testsound" class="secondary">Test sound (3 s)</button>
-<button id="sim" class="secondary">Simulate a sensor (test the alarm)</button>
-<button id="silence" class="stop hidden">SILENCE ALARM</button>
+<header>
+  <h1>NetAlert</h1>
+  <span id="link" class="pill">Not connected</span>
+</header>
+
+<section id="hero" class="hero"><div class="title" id="heroTitle"></div><div class="sub" id="heroSub"></div></section>
+<p id="msg" role="status"></p>
+
+<button id="start" class="btn primary">Start listening</button>
+<div class="row">
+  <button id="testsound" class="btn">Test sound</button>
+  <button id="sim" class="btn">Simulate</button>
+</div>
+
 <div id="cards"></div>
-<div id="log"></div>
+
+<details class="panel" id="cfgPanel">
+  <summary><span>Sensitivity <span class="state" id="cfgstate"></span></span></summary>
+  <div class="panel-body">
+    <label>Movement size to count <span id="thrval"></span></label>
+    <input type="range" id="thr" min="0.3" max="5" step="0.1" aria-label="Movement size threshold">
+    <label>Must last at least <span id="durval"></span></label>
+    <input type="range" id="dur" min="0.1" max="1.5" step="0.05" aria-label="Minimum duration">
+    <div class="hint">Lower is more sensitive. Saved on this phone and sent to the sensor every time you connect.</div>
+  </div>
+</details>
+
+<details class="panel">
+  <summary><span>Event log</span></summary>
+  <div class="panel-body"><div id="log"></div></div>
+</details>
+
+<div id="alarmbar" class="alarmbar" hidden>
+  <div class="text" id="alarmtext"></div>
+  <button id="silence">Silence alarm</button>
+</div>
 
 <script>
-// Packet format: must match firmware/src/main.c and receiver/protocol.py.
-const COMPANY_ID = 0xFFFF;
+'use strict';
+
+// ===== Constants (must match firmware/src/main.c) =====
+const SVC = '4e41ff00-9d11-4c7f-8a1b-5c7d2e6f0001';
+const CHR = '4e41ff01-9d11-4c7f-8a1b-5c7d2e6f0001';   // status notifications, 10 bytes
+const CFG = '4e41ff02-9d11-4c7f-8a1b-5c7d2e6f0001';   // settings: [threshold x10, active samples]
+const SAMPLE_HZ = 52;
 const LOST_AFTER_S = 15;      // heartbeat is 1 s; BLE drops packets, 15 s of silence is a real problem
 const CHART_WINDOW_S = 300;   // chart shows the last 5 minutes
-const THRESHOLD_MPS2 = 1.0;   // must match DEVIATION_MPS2 in firmware/src/main.c
-const SILENCE_S = 60;         // alarm stays quiet this long after you tap Silence, unless a new event occurs
+const DEFAULT_CFG = { thr: 1.0, dur: 0.2 };
 
-function parse(dv) {
-  if (dv.byteLength < 9 || dv.getUint8(0) !== 0x4E || dv.getUint8(1) !== 0x41) return null; // 'N','A'
-  const flags = dv.getUint8(3);
-  return { id: dv.getUint8(2), captured: !!(flags & 1), armed: !!(flags & 2),
-           heartbeat: dv.getUint16(4, true), captures: dv.getUint16(6, true), peak: dv.getUint8(8) / 10,
-           activity: dv.byteLength >= 10 ? dv.getUint8(9) / 10 : null };
-}
-
-const sensors = new Map();   // id -> {pkt, seen, lost, alarmedCapture}
-let alarmUntil = 0, silencedUntil = 0, audio = null, wakeLock = null;
+// ===== State =====
 const $ = (id) => document.getElementById(id);
+const sensors = new Map();    // id -> { pkt, seen, lost, alarmedCapture, hist[] }
+let device = null, cfgChar = null, reconnecting = false;
+let alarmActive = false, alarmText = '', threshold = DEFAULT_CFG.thr, wakeLock = null;
+
+// ===== Packet =====
+function parse(dv) {
+  if (dv.byteLength < 9 || dv.getUint8(0) !== 0x4E || dv.getUint8(1) !== 0x41) return null;   // 'N','A'
+  const flags = dv.getUint8(3);
+  return {
+    id: dv.getUint8(2), captured: !!(flags & 1), armed: !!(flags & 2),
+    heartbeat: dv.getUint16(4, true), captures: dv.getUint16(6, true), peak: dv.getUint8(8) / 10,
+    activity: dv.byteLength >= 10 ? dv.getUint8(9) / 10 : null,
+  };
+}
 
 function log(msg) {
-  const t = new Date().toLocaleTimeString();
-  $('log').textContent = `${t}  ${msg}\n` + $('log').textContent;
+  $('log').textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + $('log').textContent;
 }
 
+// ===== Alarm =====
 function raiseAlarm(msg) {
   log('!!! ' + msg);
-  alarmUntil = Infinity;               // sounds until acknowledged
-  silencedUntil = 0;
+  alarmActive = true; alarmText = msg;
   render();
 }
 
+$('silence').onclick = () => { alarmActive = false; log('alarm silenced'); render(); };
+
+// A looping <audio> element, not Web Audio: iOS mutes Web Audio when the ringer switch is silent
+// but plays <audio> media. It must be started from a tap once to unlock it.
+function makeAlarmWav() {
+  const rate = 22050, n = rate, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const f = i < n / 2 ? 1800 : 1200;                                             // two alternating tones
+    v.setInt16(44 + i * 2, (Math.sin(2 * Math.PI * f * i / rate) > 0 ? 1 : -1) * 0.8 * 32767, true);   // square wave
+  }
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+const siren = new Audio(makeAlarmWav());
+siren.loop = true;
+siren.setAttribute('playsinline', '');
+let audioUnlocked = false;
+
+function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
+  if (audioUnlocked) return;
+  siren.play().then(() => { siren.pause(); siren.currentTime = 0; audioUnlocked = true; })
+    .catch((e) => setMsg('Sound blocked: ' + e.message));
+}
+
+$('testsound').onclick = () => {
+  unlockAudio(); siren.currentTime = 0;
+  siren.play().then(() => setTimeout(() => { if (!alarmActive) siren.pause(); }, 3000))
+    .catch((e) => setMsg('Sound blocked: ' + e.message));
+};
+
+setInterval(() => {
+  if (alarmActive) {
+    if (siren.paused) siren.play().catch(() => setMsg('Tap "Test sound" once to enable the alarm sound.'));
+    if (navigator.vibrate) navigator.vibrate(300);
+  } else if (!siren.paused) {
+    siren.pause();
+  }
+}, 500);
+
+// ===== Sensor bookkeeping =====
 function onPacket(p) {
   let s = sensors.get(p.id);
-  if (!s) { s = { alarmedCapture: -1, lost: false }; sensors.set(p.id, s); log(`sensor ${p.id} found (armed=${p.armed})`); }
+  if (!s) { s = { alarmedCapture: -1, lost: false, hist: [] }; sensors.set(p.id, s); log(`sensor ${p.id} found (armed=${p.armed})`); }
   s.pkt = p; s.seen = Date.now();
   if (p.activity !== null) {
-    (s.hist = s.hist || []).push({ t: s.seen, v: p.activity, cap: p.captured });
+    s.hist.push({ t: s.seen, v: p.activity, cap: p.captured });
     while (s.hist.length && s.seen - s.hist[0].t > CHART_WINDOW_S * 1000) s.hist.shift();
   }
   if (s.lost) { s.lost = false; log(`sensor ${p.id} back in range`); }
   if (p.captured && s.alarmedCapture !== p.captures) {
     s.alarmedCapture = p.captures;
-    raiseAlarm(`CAPTURE on net ${p.id}! peak ${p.peak.toFixed(1)} m/s2`);
+    raiseAlarm(`CAPTURE on net ${p.id}. Peak ${p.peak.toFixed(1)} m/s²`);
   }
   render();
 }
@@ -91,159 +231,202 @@ setInterval(() => {
   for (const [id, s] of sensors) {
     if (!s.lost && now - s.seen > LOST_AFTER_S * 1000) {
       s.lost = true;
-      raiseAlarm(`Net ${id} sensor SIGNAL LOST (out of range or dead battery)`);
+      raiseAlarm(`Net ${id} signal lost: out of range or dead battery`);
     }
   }
 }, 1000);
 
+// ===== Rendering =====
+function setMsg(t) { $('msg').textContent = t; }
+
+function sensorView(s) {
+  const p = s.pkt;
+  if (s.lost) return { tone: 'warn', label: 'Signal lost' };
+  if (p.captured) return { tone: 'bad', label: 'Capture' };
+  if (!p.armed) return { tone: 'info', label: 'Arming…' };
+  return { tone: 'ok', label: 'Armed' };
+}
+
+function renderHero() {
+  const views = [...sensors].map(([id, s]) => ({ id, s, ...sensorView(s) }));
+  const worst = ['bad', 'warn', 'info'].map((t) => views.find((v) => v.tone === t)).find(Boolean);
+  let tone = 'idle', title = 'Not listening', sub = 'Tap Start listening to connect to a sensor';
+  if (worst) {
+    tone = worst.tone;
+    title = { bad: 'CAPTURE', warn: 'Signal lost', info: 'Arming…' }[worst.tone];
+    sub = worst.tone === 'bad' ? `Net ${worst.id} · peak ${worst.s.pkt.peak.toFixed(1)} m/s²`
+        : worst.tone === 'warn' ? `Net ${worst.id} has not been heard for ${Math.round((Date.now() - worst.s.seen) / 1000)} s`
+        : 'The sensor arms 30 s after power-up';
+  } else if (views.length) {
+    tone = 'ok'; title = 'All quiet'; sub = `${views.length} sensor${views.length > 1 ? 's' : ''} armed`;
+  } else if (device) {
+    sub = 'Waiting for the first reading…';
+  }
+  $('hero').className = 'hero ' + tone;
+  $('heroTitle').textContent = title; $('heroSub').textContent = sub;
+}
+
+function renderLink() {
+  const up = device && device.gatt.connected;
+  const link = $('link');
+  link.className = 'pill ' + (up ? 'on' : reconnecting ? 'wait' : '');
+  link.textContent = up ? 'Connected' : reconnecting ? 'Reconnecting…' : 'Not connected';
+}
+
 function render() {
-  $('cards').innerHTML = '';
+  renderHero(); renderLink();
+  document.body.classList.toggle('alarm', alarmActive);
+  $('alarmbar').hidden = !alarmActive;
+  $('alarmtext').textContent = alarmText;
+
+  const cards = $('cards');
+  cards.textContent = '';
   for (const [id, s] of [...sensors].sort((a, b) => a[0] - b[0])) {
-    const p = s.pkt;
-    const state = s.lost ? 'SIGNAL LOST' : p.captured ? 'CAPTURE' : p.armed ? 'Armed, quiet' : 'Not armed yet';
-    const cls = s.lost ? 'lost' : p.captured ? 'captured' : p.armed ? '' : 'unarmed';
-    const age = Math.round((Date.now() - s.seen) / 1000);
-    const d = document.createElement('div');
-    d.className = 'card ' + cls;
-    d.innerHTML = `<b>Net ${id}</b> <span class="state">${state}</span><br>` +
-      `<span class="sub">last packet ${age}s ago · captures ${p.captures}${p.captured ? ' · peak ' + p.peak.toFixed(1) + ' m/s²' : ''}</span>`;
-    $('cards').appendChild(d);
-    if (s.hist && s.hist.length) {
-      const c = document.createElement('canvas'); c.className = 'chart'; d.appendChild(c);
+    const v = sensorView(s), p = s.pkt, age = Math.round((Date.now() - s.seen) / 1000);
+    const card = document.createElement('div');
+    card.className = 'card ' + (v.tone === 'ok' ? '' : v.tone);
+    card.innerHTML = `<div class="card-head"><b>Net ${id}</b><span class="badge ${v.tone}">${v.label}</span></div>` +
+      `<div class="meta">Last reading ${age} s ago · captures ${p.captures}</div>`;
+    cards.appendChild(card);
+    if (s.hist.length) {
+      const c = document.createElement('canvas'); c.className = 'chart'; card.appendChild(c);
       drawChart(c, s.hist);
     }
   }
-  const ringing = isRinging();
-  document.body.classList.toggle('alarm', ringing);
-  $('silence').classList.toggle('hidden', !(alarmUntil > Date.now()));
 }
 setInterval(render, 1000);
 
-// Movement chart: max movement per second (m/s²) over the last 5 minutes, threshold line, capture shading.
+// ===== Movement chart: max movement per second over the last 5 minutes =====
 function drawChart(canvas, hist) {
   const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
   canvas.width = w * dpr; canvas.height = h * dpr;
   const g = canvas.getContext('2d'); g.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement);
-  const fg = css.getPropertyValue('--muted').trim(), bad = css.getPropertyValue('--bad').trim(), ok = css.getPropertyValue('--ok').trim(), warn = css.getPropertyValue('--warn').trim();
-  const now = Date.now(), padL = 30, padB = 16, pw = w - padL - 4, ph = h - padB - 4;
-  const ymax = Math.max(3, Math.ceil(Math.max(...hist.map((q) => q.v)) * 1.15));
+  const color = (n) => css.getPropertyValue(n).trim();
+  const muted = color('--muted'), ok = color('--ok'), bad = color('--bad'), warn = color('--warn'), line = color('--line');
+  const now = Date.now(), padL = 30, padR = 4, padT = 6, padB = 18, pw = w - padL - padR, ph = h - padT - padB;
+  const ymax = Math.max(3, Math.ceil(Math.max(threshold * 1.3, ...hist.map((q) => q.v)) * 1.1));
   const X = (t) => padL + pw * (1 - (now - t) / (CHART_WINDOW_S * 1000));
-  const Y = (v) => 4 + ph * (1 - v / ymax);
-  g.font = '11px system-ui'; g.fillStyle = fg; g.strokeStyle = fg; g.lineWidth = 1;
-  g.fillText(ymax, 2, 12); g.fillText('0', 14, 4 + ph); g.fillText('-5 min', padL, h - 3); g.fillText('now', w - 26, h - 3);
-  g.globalAlpha = 0.25; g.beginPath(); g.moveTo(padL, 4 + ph); g.lineTo(w - 4, 4 + ph); g.stroke(); g.globalAlpha = 1;
-  g.strokeStyle = warn; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(padL, Y(THRESHOLD_MPS2)); g.lineTo(w - 4, Y(THRESHOLD_MPS2)); g.stroke(); g.setLineDash([]);
-  g.fillStyle = bad; g.globalAlpha = 0.18;
-  for (let i = 0; i < hist.length; i++) if (hist[i].cap) { const x0 = X(hist[i].t), x1 = i + 1 < hist.length ? X(hist[i + 1].t) : w - 4; g.fillRect(x0, 4, Math.max(2, x1 - x0), ph); }
+  const Y = (v) => padT + ph * (1 - v / ymax);
+
+  g.font = '11px -apple-system, system-ui, sans-serif'; g.fillStyle = muted; g.textBaseline = 'middle';
+  for (const v of [0, ymax / 2, ymax]) {                      // horizontal grid + labels
+    g.strokeStyle = line; g.lineWidth = 1; g.beginPath(); g.moveTo(padL, Y(v)); g.lineTo(w - padR, Y(v)); g.stroke();
+    g.fillText(Number.isInteger(v) ? v : v.toFixed(1), 2, Y(v));
+  }
+  g.textBaseline = 'alphabetic'; g.fillText('−5 min', padL, h - 3); g.textAlign = 'right'; g.fillText('now', w - padR, h - 3); g.textAlign = 'left';
+
+  g.fillStyle = bad; g.globalAlpha = 0.16;                    // capture periods
+  hist.forEach((q, i) => { if (q.cap) { const x0 = X(q.t), x1 = i + 1 < hist.length ? X(hist[i + 1].t) : w - padR; g.fillRect(x0, padT, Math.max(2, x1 - x0), ph); } });
   g.globalAlpha = 1;
-  g.strokeStyle = ok; g.lineWidth = 1.5; g.beginPath();
-  hist.forEach((q, i) => { const x = X(q.t), y = Y(q.v); if (i === 0 || q.t - hist[i - 1].t > 3000) g.moveTo(x, y); else g.lineTo(x, y); });  // gap = no signal
-  g.stroke();
-}
 
-// ---- Alarm sound ----
-// A looping <audio> element, not Web Audio: iOS mutes Web Audio when the ringer switch is silent,
-// but plays <audio> media. It must be started from a tap once to unlock it.
-function makeAlarmWav() {
-  const rate = 22050, secs = 1.0, n = Math.floor(rate * secs), buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
-  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
-  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
-  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
-  for (let i = 0; i < n; i++) {
-    const f = i < n / 2 ? 1800 : 1200;                       // two alternating tones
-    v.setInt16(44 + i * 2, (Math.sin(2 * Math.PI * f * i / rate) > 0 ? 1 : -1) * 0.8 * 32767, true);  // square wave
+  g.strokeStyle = warn; g.lineWidth = 1.2; g.setLineDash([5, 4]);   // threshold
+  g.beginPath(); g.moveTo(padL, Y(threshold)); g.lineTo(w - padR, Y(threshold)); g.stroke(); g.setLineDash([]);
+  g.fillStyle = warn; g.textAlign = 'right'; g.fillText(`limit ${threshold.toFixed(1)}`, w - padR, Math.max(padT + 10, Y(threshold) - 5)); g.textAlign = 'left';
+
+  const segs = [[]];                                          // a gap longer than 3 s means no signal
+  hist.forEach((q, i) => { if (i && q.t - hist[i - 1].t > 3000) segs.push([]); segs[segs.length - 1].push(q); });
+  for (const seg of segs) {
+    const fill = g.createLinearGradient(0, padT, 0, padT + ph); fill.addColorStop(0, ok + '66'); fill.addColorStop(1, ok + '00');
+    g.beginPath(); seg.forEach((q, i) => (i ? g.lineTo(X(q.t), Y(q.v)) : g.moveTo(X(q.t), Y(q.v))));
+    g.strokeStyle = ok; g.lineWidth = 1.8; g.lineJoin = 'round'; g.stroke();
+    g.lineTo(X(seg[seg.length - 1].t), Y(0)); g.lineTo(X(seg[0].t), Y(0)); g.closePath(); g.fillStyle = fill; g.fill();
   }
-  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
-const alarmAudio = new Audio(makeAlarmWav());
-alarmAudio.loop = true;
-alarmAudio.setAttribute('playsinline', '');
-let audioUnlocked = false;
-function unlockAudio() {
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
-  if (audioUnlocked) return;
-  alarmAudio.play().then(() => { alarmAudio.pause(); alarmAudio.currentTime = 0; audioUnlocked = true; })
-    .catch((e) => { $('msg').textContent = 'Sound blocked: ' + e.message; });
+
+// ===== Sensitivity settings: saved on the phone, written to the sensor on every connect =====
+function loadCfg() { try { return JSON.parse(localStorage.getItem('na-cfg')); } catch (e) { return null; } }
+function saveCfg(c) { try { localStorage.setItem('na-cfg', JSON.stringify(c)); } catch (e) { /* storage is optional */ } }
+function sliderCfg() { return { thr: parseFloat($('thr').value), dur: parseFloat($('dur').value) }; }
+
+function showCfg(thr, dur) {
+  threshold = thr;
+  $('thr').value = thr; $('dur').value = dur;
+  $('thrval').textContent = thr.toFixed(1) + ' m/s²';
+  $('durval').textContent = dur.toFixed(2) + ' s';
 }
-function isRinging() { return Date.now() >= silencedUntil && alarmUntil > Date.now(); }
-setInterval(() => {
-  if (isRinging()) {
-    if (alarmAudio.paused) alarmAudio.play().catch(() => { $('msg').textContent = 'Tap "Test sound" to enable the alarm sound.'; });
-    if (navigator.vibrate) navigator.vibrate(300);
-  } else if (!alarmAudio.paused) {
-    alarmAudio.pause();
+
+async function writeCfg() {
+  const { thr, dur } = sliderCfg();
+  if (!cfgChar || !device || !device.gatt.connected) { $('cfgstate').textContent = '· saved, applies when connected'; return; }
+  try {
+    await cfgChar.writeValue(new Uint8Array([Math.round(thr * 10), Math.round(dur * SAMPLE_HZ)]));
+    $('cfgstate').textContent = '· applied to sensor';
+    log(`sensitivity set: ${thr.toFixed(1)} m/s² for ${dur.toFixed(2)} s`);
+  } catch (e) { $('cfgstate').textContent = '· sensor refused: ' + e.message; }
+}
+
+let cfgTimer = null;
+function onSlide() {
+  const c = sliderCfg(); showCfg(c.thr, c.dur); saveCfg(c);
+  clearTimeout(cfgTimer); cfgTimer = setTimeout(writeCfg, 500);   // wait until the slider settles
+  render();
+}
+$('thr').oninput = onSlide; $('dur').oninput = onSlide;
+{ const c = loadCfg() || DEFAULT_CFG; showCfg(c.thr, c.dur); }
+
+// ===== Bluetooth: connect, subscribe, reconnect =====
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function connect() {
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  const chr = await svc.getCharacteristic(CHR);
+  chr.addEventListener('characteristicvaluechanged', (e) => { const p = parse(e.target.value); if (p) onPacket(p); });
+  await chr.startNotifications();
+  const first = parse(await chr.readValue());
+  if (first) onPacket(first);
+
+  try { cfgChar = await svc.getCharacteristic(CFG); }
+  catch (e) { cfgChar = null; $('cfgstate').textContent = '· sensor firmware has no settings'; return; }
+  if (loadCfg()) await writeCfg();                           // the phone's saved setting wins
+  else { const v = await cfgChar.readValue(); showCfg(v.getUint8(0) / 10, v.getUint8(1) / SAMPLE_HZ); $('cfgstate').textContent = '· from sensor'; }
+}
+
+async function reconnectLoop() {
+  reconnecting = true; render();
+  while (device && !device.gatt.connected) {
+    try { await connect(); log('reconnected'); break; } catch (e) { await sleep(3000); }
   }
-}, 500);
+  reconnecting = false; render();
+}
 
-$('testsound').onclick = () => {
-  unlockAudio(); alarmAudio.currentTime = 0;
-  alarmAudio.play().then(() => setTimeout(() => { if (!isRinging()) alarmAudio.pause(); }, 3000))
-    .catch((e) => { $('msg').textContent = 'Sound blocked: ' + e.message; });
-};
-
-$('silence').onclick = () => { silencedUntil = Date.now() + SILENCE_S * 1000; alarmUntil = 0; log('alarm silenced'); render(); };
-
-// ---- Bluetooth ----
 async function keepAwake() {
   try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* optional */ }
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wakeLock) keepAwake(); });
 
-const SVC = '4e41ff00-9d11-4c7f-8a1b-5c7d2e6f0001';   // must match firmware/src/main.c
-const CHR = '4e41ff01-9d11-4c7f-8a1b-5c7d2e6f0001';
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let device = null;
-
-// Connect and subscribe. The board sends the same 9-byte packet once a second while connected.
-async function connect() {
-  const server = await device.gatt.connect();
-  const chr = await (await server.getPrimaryService(SVC)).getCharacteristic(CHR);
-  chr.addEventListener('characteristicvaluechanged', (e) => { const p = parse(e.target.value); if (p) onPacket(p); });
-  await chr.startNotifications();
-  const first = parse(await chr.readValue());
-  if (first) onPacket(first);
-}
-
-async function reconnectLoop() {
-  while (device && !device.gatt.connected) {
-    try { await connect(); log('reconnected'); return; } catch (e) { await sleep(3000); }
-  }
-}
-
 $('start').onclick = async () => {
   unlockAudio(); keepAwake();
-  if (!navigator.bluetooth) {
-    $('msg').textContent = 'This browser has no Bluetooth. On iPhone open this page in the Bluefy app.';
-    return;
-  }
+  if (!navigator.bluetooth) { setMsg('This browser has no Bluetooth. On iPhone open this page in the Bluefy app.'); return; }
   try {
     device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'NetAlert' }], optionalServices: [SVC] });
     device.addEventListener('gattserverdisconnected', () => { log('Bluetooth link dropped, reconnecting'); reconnectLoop(); });
     await connect();
-    $('msg').textContent = '';
-    $('start').textContent = 'Connected';
-    $('start').disabled = true;
+    setMsg('');
+    $('start').textContent = 'Listening'; $('start').disabled = true;
     log('connected to ' + device.name);
+    render();
   } catch (err) {
-    $('msg').textContent = 'Could not connect: ' + err.message;
+    setMsg('Could not connect: ' + err.message);
   }
 };
 
-// ---- Simulation: sensor 1 goes quiet, captures, then falls silent (lost-signal alarm) ----
+// ===== Simulation: a sensor goes quiet, captures, then falls silent (exercises both alarms) =====
 $('sim').onclick = () => {
   unlockAudio();
   log('SIMULATION: no radio in use');
   let beat = 0;
-  const t = setInterval(() => {
+  const timer = setInterval(() => {
     beat++;
     const captured = beat >= 3 && beat <= 6;
     onPacket({ id: 1, captured, armed: true, heartbeat: beat, captures: beat >= 3 ? 1 : 0, peak: captured ? 9.7 : 0,
                activity: captured ? 6 + Math.random() * 4 : 0.05 + Math.random() * 0.1 });
-    if (beat === 8) clearInterval(t);
+    if (beat === 8) clearInterval(timer);
   }, 1000);
 };
+
+render();
 </script>
 </body>
 </html>
