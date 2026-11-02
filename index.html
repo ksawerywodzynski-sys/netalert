@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NetAlert</title>
+<style>
+  :root { --bg:#10151a; --fg:#e8eef2; --muted:#8a98a3; --card:#1a222a; --ok:#2fbf71; --bad:#e5484d; --warn:#f5a524; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f4f6f8; --fg:#14202a; --muted:#5b6b78; --card:#fff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,-apple-system,sans-serif; }
+  body.alarm { animation: flash 0.8s steps(2) infinite; }
+  @keyframes flash { 50% { background:#5a0f12; } }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:16px; }
+  button { font:inherit; padding:14px 18px; border:0; border-radius:10px; background:#2d6cdf; color:#fff; width:100%; margin-bottom:10px; }
+  button.secondary { background:var(--card); color:var(--fg); border:1px solid var(--muted); }
+  button.stop { background:var(--bad); font-size:20px; padding:20px; }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:10px; border-left:6px solid var(--ok); }
+  .card.captured { border-color:var(--bad); }
+  .card.lost, .card.unarmed { border-color:var(--warn); }
+  .card b { font-size:18px; }
+  .state { font-weight:600; }
+  #log { font:13px ui-monospace,monospace; color:var(--muted); white-space:pre-wrap; max-height:30vh; overflow:auto; }
+  #msg { color:var(--warn); margin-bottom:10px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<h1>NetAlert</h1>
+<div class="sub">Mist-net capture sensors. Keep this page open and the screen on.</div>
+<div id="msg"></div>
+<button id="start">Start listening</button>
+<button id="sim" class="secondary">Simulate a sensor (test the alarm)</button>
+<button id="silence" class="stop hidden">SILENCE ALARM</button>
+<div id="cards"></div>
+<div id="log"></div>
+
+<script>
+// Packet format: must match firmware/src/main.c and receiver/protocol.py.
+const COMPANY_ID = 0xFFFF;
+const LOST_AFTER_S = 15;      // heartbeat is 1 s; BLE drops packets, 15 s of silence is a real problem
+const SILENCE_S = 60;         // alarm stays quiet this long after you tap Silence, unless a new event occurs
+
+function parse(dv) {
+  if (dv.byteLength < 9 || dv.getUint8(0) !== 0x4E || dv.getUint8(1) !== 0x41) return null; // 'N','A'
+  const flags = dv.getUint8(3);
+  return { id: dv.getUint8(2), captured: !!(flags & 1), armed: !!(flags & 2),
+           heartbeat: dv.getUint16(4, true), captures: dv.getUint16(6, true), peak: dv.getUint8(8) / 10 };
+}
+
+const sensors = new Map();   // id -> {pkt, seen, lost, alarmedCapture}
+let alarmUntil = 0, silencedUntil = 0, audio = null, wakeLock = null;
+const $ = (id) => document.getElementById(id);
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  $('log').textContent = `${t}  ${msg}\n` + $('log').textContent;
+}
+
+function raiseAlarm(msg) {
+  log('!!! ' + msg);
+  alarmUntil = Infinity;               // sounds until acknowledged
+  silencedUntil = 0;
+  render();
+}
+
+function onPacket(p) {
+  let s = sensors.get(p.id);
+  if (!s) { s = { alarmedCapture: -1, lost: false }; sensors.set(p.id, s); log(`sensor ${p.id} found (armed=${p.armed})`); }
+  s.pkt = p; s.seen = Date.now();
+  if (s.lost) { s.lost = false; log(`sensor ${p.id} back in range`); }
+  if (p.captured && s.alarmedCapture !== p.captures) {
+    s.alarmedCapture = p.captures;
+    raiseAlarm(`CAPTURE on net ${p.id}! peak ${p.peak.toFixed(1)} m/s2`);
+  }
+  render();
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, s] of sensors) {
+    if (!s.lost && now - s.seen > LOST_AFTER_S * 1000) {
+      s.lost = true;
+      raiseAlarm(`Net ${id} sensor SIGNAL LOST (out of range or dead battery)`);
+    }
+  }
+}, 1000);
+
+function render() {
+  $('cards').innerHTML = '';
+  for (const [id, s] of [...sensors].sort((a, b) => a[0] - b[0])) {
+    const p = s.pkt;
+    const state = s.lost ? 'SIGNAL LOST' : p.captured ? 'CAPTURE' : p.armed ? 'Armed, quiet' : 'Not armed yet';
+    const cls = s.lost ? 'lost' : p.captured ? 'captured' : p.armed ? '' : 'unarmed';
+    const age = Math.round((Date.now() - s.seen) / 1000);
+    const d = document.createElement('div');
+    d.className = 'card ' + cls;
+    d.innerHTML = `<b>Net ${id}</b> <span class="state">${state}</span><br>` +
+      `<span class="sub">last packet ${age}s ago · captures ${p.captures}${p.captured ? ' · peak ' + p.peak.toFixed(1) + ' m/s²' : ''}</span>`;
+    $('cards').appendChild(d);
+  }
+  const ringing = Date.now() >= silencedUntil && alarmUntil > Date.now();
+  document.body.classList.toggle('alarm', ringing);
+  $('silence').classList.toggle('hidden', !(alarmUntil > Date.now()));
+}
+setInterval(render, 1000);
+
+// ---- Alarm sound (needs a user tap first to unlock audio on iOS) ----
+function unlockAudio() {
+  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+  if (audio.state !== 'running') audio.resume();
+}
+function beep(freq) {
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.4;
+  o.connect(g); g.connect(audio.destination);
+  o.start(); o.stop(audio.currentTime + 0.35);
+}
+let tone = false;
+setInterval(() => {
+  if (audio && Date.now() >= silencedUntil && alarmUntil > Date.now()) {
+    beep((tone = !tone) ? 1800 : 1200);
+    if (navigator.vibrate) navigator.vibrate(300);
+  }
+}, 450);
+
+$('silence').onclick = () => { silencedUntil = Date.now() + SILENCE_S * 1000; alarmUntil = 0; log('alarm silenced'); render(); };
+
+// ---- Bluetooth ----
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* optional */ }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wakeLock) keepAwake(); });
+
+$('start').onclick = async () => {
+  unlockAudio(); keepAwake();
+  if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
+    $('msg').textContent = 'This browser cannot scan Bluetooth advertisements. On iPhone open this page in the Bluefy app.';
+    return;
+  }
+  try {
+    navigator.bluetooth.addEventListener('advertisementreceived', (e) => {
+      const dv = e.manufacturerData && e.manufacturerData.get(COMPANY_ID);
+      const p = dv && parse(dv);
+      if (p) onPacket(p);
+    });
+    await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    $('msg').textContent = '';
+    $('start').textContent = 'Listening…';
+    $('start').disabled = true;
+    log('scan started');
+  } catch (err) {
+    $('msg').textContent = 'Could not start scan: ' + err.message;
+  }
+};
+
+// ---- Simulation: sensor 1 goes quiet, captures, then falls silent (lost-signal alarm) ----
+$('sim').onclick = () => {
+  unlockAudio();
+  log('SIMULATION: no radio in use');
+  let beat = 0;
+  const t = setInterval(() => {
+    beat++;
+    const captured = beat >= 3 && beat <= 6;
+    onPacket({ id: 1, captured, armed: true, heartbeat: beat, captures: beat >= 3 ? 1 : 0, peak: captured ? 9.7 : 0 });
+    if (beat === 8) clearInterval(t);
+  }, 1000);
+};
+</script>
+</body>
+</html>
