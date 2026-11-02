@@ -45,17 +45,20 @@
   .hero.warn { background: color-mix(in srgb, var(--warn) 16%, var(--surface)); border-color: var(--warn); }
   .hero.warn .title { color: var(--warn); }
   .hero.info .title { color: var(--info); }
-  body.alarm .hero { animation: pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--bad) 35%, transparent); } }
+
+  /* The alarm is visual only: the whole screen blinks red (about 1.2 flashes per second). */
+  body.alarm::before { content: ""; position: fixed; inset: 0; z-index: 5; pointer-events: none; background: var(--bad);
+                       animation: blink .8s infinite; }
+  @keyframes blink { 0%, 49% { opacity: 0; } 50%, 100% { opacity: .55; } }
 
   .btn { font: inherit; font-weight: 600; min-height: 48px; padding: 0 18px; border-radius: 12px; border: 1px solid var(--line);
-         background: var(--surface); color: var(--fg); width: 100%; cursor: pointer; }
+         background: var(--surface); color: var(--fg); width: 100%; cursor: pointer; margin-top: 10px; }
   .btn:active { transform: scale(.985); }
-  .btn.primary { background: var(--accent); border-color: transparent; color: #fff; font-size: 17px; min-height: 54px; }
+  .btn.primary { background: var(--accent); border-color: transparent; color: #fff; font-size: 17px; min-height: 54px; margin-top: 0; }
   .btn:disabled { opacity: .55; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0 14px; }
   #msg { color: var(--warn); margin: 0 0 10px; }
   #msg:empty { display: none; }
+  .gap { height: 14px; }
 
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 14px 10px;
           margin-bottom: 12px; border-left: 5px solid var(--ok); }
@@ -77,7 +80,6 @@
   .panel-body label span { font-weight: 700; }
   input[type=range] { width: 100%; accent-color: var(--accent); height: 32px; }
   .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
-  .state { color: var(--muted); font-weight: 400; font-size: 13px; }
   #log { font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted); white-space: pre-wrap; max-height: 34vh; overflow: auto; }
 
   .alarmbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; background: var(--bad); color: #fff;
@@ -98,21 +100,19 @@
 <p id="msg" role="status"></p>
 
 <button id="start" class="btn primary">Start listening</button>
-<div class="row">
-  <button id="testsound" class="btn">Test sound</button>
-  <button id="sim" class="btn">Simulate</button>
-</div>
+<button id="sim" class="btn">Simulate a sensor</button>
+<div class="gap"></div>
 
 <div id="cards"></div>
 
-<details class="panel" id="cfgPanel">
-  <summary><span>Sensitivity <span class="state" id="cfgstate"></span></span></summary>
+<details class="panel">
+  <summary><span>Sensitivity</span></summary>
   <div class="panel-body">
     <label>Movement size to count <span id="thrval"></span></label>
     <input type="range" id="thr" min="0.3" max="5" step="0.1" aria-label="Movement size threshold">
     <label>Must last at least <span id="durval"></span></label>
     <input type="range" id="dur" min="0.1" max="1.5" step="0.05" aria-label="Minimum duration">
-    <div class="hint">Lower is more sensitive. Saved on this phone and sent to the sensor every time you connect.</div>
+    <div class="hint">Lower is more sensitive. The sensor only streams movement; this app decides what counts as a capture. Saved on this phone.</div>
   </div>
 </details>
 
@@ -123,140 +123,146 @@
 
 <div id="alarmbar" class="alarmbar" hidden>
   <div class="text" id="alarmtext"></div>
-  <button id="silence">Silence alarm</button>
+  <button id="silence">Stop alarm</button>
 </div>
 
 <script>
 'use strict';
 
-// ===== Constants (must match firmware/src/main.c) =====
+// ===== Constants =====
+// Sensor protocol (must match firmware/src/main.c): 20-byte notifications,
+// [0] sensor id, [1] sequence, [2..19] three samples of x,y,z int16 LE in 0.01 m/s².
 const SVC = '4e41ff00-9d11-4c7f-8a1b-5c7d2e6f0001';
-const CHR = '4e41ff01-9d11-4c7f-8a1b-5c7d2e6f0001';   // status notifications, 10 bytes
-const CFG = '4e41ff02-9d11-4c7f-8a1b-5c7d2e6f0001';   // settings: [threshold x10, active samples]
+const CHR = '4e41ff01-9d11-4c7f-8a1b-5c7d2e6f0001';
 const SAMPLE_HZ = 52;
-const LOST_AFTER_S = 15;      // heartbeat is 1 s; BLE drops packets, 15 s of silence is a real problem
-const CHART_WINDOW_S = 300;   // chart shows the last 5 minutes
-const DEFAULT_CFG = { thr: 1.0, dur: 0.2 };
+const SAMPLES_PER_PACKET = 3;
+
+// Detection (all decided here, not on the sensor).
+const ARM_DELAY_S = 30;        // time to hang the sensor and walk away before it can trigger
+const BASELINE_ALPHA = 0.004;  // ~5 s time constant at 52 Hz: absorbs tilt, passes ~1 Hz sway
+const WINDOW_S = 3;            // look-back window for activity
+const CAPTURE_HOLD_S = 60;     // stay in "capture" this long after the last movement
+const LOST_AFTER_S = 5;        // data arrives ~17 times a second; 5 s of nothing is a real problem
+const CHART_WINDOW_S = 300;    // chart shows the last 5 minutes
+const DEFAULT_CFG = { thr: 1.0, dur: 0.2 };   // m/s² and seconds
 
 // ===== State =====
 const $ = (id) => document.getElementById(id);
-const sensors = new Map();    // id -> { pkt, seen, lost, alarmedCapture, hist[] }
-let device = null, cfgChar = null, reconnecting = false;
-let alarmActive = false, alarmText = '', threshold = DEFAULT_CFG.thr, wakeLock = null;
-
-// ===== Packet =====
-function parse(dv) {
-  if (dv.byteLength < 9 || dv.getUint8(0) !== 0x4E || dv.getUint8(1) !== 0x41) return null;   // 'N','A'
-  const flags = dv.getUint8(3);
-  return {
-    id: dv.getUint8(2), captured: !!(flags & 1), armed: !!(flags & 2),
-    heartbeat: dv.getUint16(4, true), captures: dv.getUint16(6, true), peak: dv.getUint8(8) / 10,
-    activity: dv.byteLength >= 10 ? dv.getUint8(9) / 10 : null,
-  };
-}
+const sensors = new Map();     // id -> sensor (see newSensor)
+let device = null, reconnecting = false, wakeLock = null;
+let alarmActive = false, alarmText = '', threshold = DEFAULT_CFG.thr, minSamples = Math.round(DEFAULT_CFG.dur * SAMPLE_HZ);
 
 function log(msg) {
   $('log').textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + $('log').textContent;
 }
+function setMsg(t) { $('msg').textContent = t; }
 
-// ===== Alarm =====
-function raiseAlarm(msg) {
-  log('!!! ' + msg);
-  alarmActive = true; alarmText = msg;
-  render();
-}
-
-$('silence').onclick = () => { alarmActive = false; log('alarm silenced'); render(); };
-
-// A looping <audio> element, not Web Audio: iOS mutes Web Audio when the ringer switch is silent
-// but plays <audio> media. It must be started from a tap once to unlock it.
-function makeAlarmWav() {
-  const rate = 22050, n = rate, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
-  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
-  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
-  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
-  for (let i = 0; i < n; i++) {
-    const f = i < n / 2 ? 1800 : 1200;                                             // two alternating tones
-    v.setInt16(44 + i * 2, (Math.sin(2 * Math.PI * f * i / rate) > 0 ? 1 : -1) * 0.8 * 32767, true);   // square wave
+// ===== Packet =====
+function parse(dv) {
+  if (dv.byteLength < 2 + 6) return null;
+  const samples = [];
+  for (let o = 2; o + 6 <= dv.byteLength; o += 6) {
+    samples.push([dv.getInt16(o, true) / 100, dv.getInt16(o + 2, true) / 100, dv.getInt16(o + 4, true) / 100]);
   }
-  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
-}
-const siren = new Audio(makeAlarmWav());
-siren.loop = true;
-siren.setAttribute('playsinline', '');
-let audioUnlocked = false;
-
-function unlockAudio() {
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
-  if (audioUnlocked) return;
-  siren.play().then(() => { siren.pause(); siren.currentTime = 0; audioUnlocked = true; })
-    .catch((e) => setMsg('Sound blocked: ' + e.message));
+  return { id: dv.getUint8(0), seq: dv.getUint8(1), samples };
 }
 
-$('testsound').onclick = () => {
-  unlockAudio(); siren.currentTime = 0;
-  siren.play().then(() => setTimeout(() => { if (!alarmActive) siren.pause(); }, 3000))
-    .catch((e) => setMsg('Sound blocked: ' + e.message));
-};
+// ===== Detector: per-sensor state, one sample at a time =====
+function newSensor(id) {
+  return {
+    id, base: null, n: 0, ring: new Uint8Array(WINDOW_S * SAMPLE_HZ), head: 0, active: 0,
+    secMax: 0, hist: [], seen: Date.now(), lost: false, lastSeq: null, dropped: 0,
+    captured: false, captures: 0, peak: 0, lastActiveAt: 0,
+  };
+}
 
-setInterval(() => {
-  if (alarmActive) {
-    if (siren.paused) siren.play().catch(() => setMsg('Tap "Test sound" once to enable the alarm sound.'));
-    if (navigator.vibrate) navigator.vibrate(300);
-  } else if (!siren.paused) {
-    siren.pause();
+function getSensor(id) {
+  let s = sensors.get(id);
+  if (!s) { s = newSensor(id); sensors.set(id, s); log(`sensor ${id} found, arming for ${ARM_DELAY_S} s`); }
+  return s;
+}
+
+const isArmed = (s) => s.n >= ARM_DELAY_S * SAMPLE_HZ;
+
+function processSample(s, [x, y, z], now) {
+  if (!s.base) s.base = [x, y, z];
+  // Distance of the acceleration vector from its slow-moving baseline. Per axis, so a horizontal
+  // sway counts (|a| alone barely changes then); slow tilts are absorbed by the baseline.
+  const d = [x - s.base[0], y - s.base[1], z - s.base[2]];
+  const dev = Math.hypot(...d);
+  for (let i = 0; i < 3; i++) s.base[i] += BASELINE_ALPHA * d[i];
+  s.n++;
+  if (dev > s.secMax) s.secMax = dev;
+
+  const armed = isArmed(s);
+  const active = armed && dev > threshold ? 1 : 0;
+  s.active += active - s.ring[s.head];
+  s.ring[s.head] = active;
+  s.head = (s.head + 1) % s.ring.length;
+
+  if (active) { s.lastActiveAt = now; if (dev > s.peak) s.peak = dev; }
+  if (armed && s.active >= minSamples) {
+    if (!s.captured) {
+      s.captured = true; s.captures++;
+      raiseAlarm(`CAPTURE on net ${s.id}. Peak ${s.peak.toFixed(1)} m/s²`);
+    }
+  } else if (s.captured && now - s.lastActiveAt > CAPTURE_HOLD_S * 1000) {
+    s.captured = false; s.peak = 0;
   }
-}, 500);
 
-// ===== Sensor bookkeeping =====
+  if (s.n % SAMPLE_HZ === 0) {                     // once per second: one chart point
+    s.hist.push({ t: now, v: s.secMax, cap: s.captured });
+    s.secMax = 0;
+    while (s.hist.length && now - s.hist[0].t > CHART_WINDOW_S * 1000) s.hist.shift();
+  }
+}
+
 function onPacket(p) {
-  let s = sensors.get(p.id);
-  if (!s) { s = { alarmedCapture: -1, lost: false, hist: [] }; sensors.set(p.id, s); log(`sensor ${p.id} found (armed=${p.armed})`); }
-  s.pkt = p; s.seen = Date.now();
-  if (p.activity !== null) {
-    s.hist.push({ t: s.seen, v: p.activity, cap: p.captured });
-    while (s.hist.length && s.seen - s.hist[0].t > CHART_WINDOW_S * 1000) s.hist.shift();
-  }
+  const s = getSensor(p.id), now = Date.now();
+  if (s.lastSeq !== null) s.dropped += (p.seq - s.lastSeq - 1) & 0xFF;
+  s.lastSeq = p.seq; s.seen = now;
   if (s.lost) { s.lost = false; log(`sensor ${p.id} back in range`); }
-  if (p.captured && s.alarmedCapture !== p.captures) {
-    s.alarmedCapture = p.captures;
-    raiseAlarm(`CAPTURE on net ${p.id}. Peak ${p.peak.toFixed(1)} m/s²`);
-  }
+  for (const sample of p.samples) processSample(s, sample, now);
   render();
 }
 
 setInterval(() => {
   const now = Date.now();
-  for (const [id, s] of sensors) {
+  for (const s of sensors.values()) {
     if (!s.lost && now - s.seen > LOST_AFTER_S * 1000) {
       s.lost = true;
-      raiseAlarm(`Net ${id} signal lost: out of range or dead battery`);
+      raiseAlarm(`Net ${s.id} signal lost: out of range or dead battery`);
     }
   }
 }, 1000);
 
-// ===== Rendering =====
-function setMsg(t) { $('msg').textContent = t; }
+// ===== Alarm: the screen blinks red until you tap Stop alarm =====
+function raiseAlarm(msg) {
+  log('!!! ' + msg);
+  alarmActive = true; alarmText = msg;
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300]);
+  render();
+}
+$('silence').onclick = () => { alarmActive = false; log('alarm stopped'); render(); };
 
+// ===== Rendering =====
 function sensorView(s) {
-  const p = s.pkt;
   if (s.lost) return { tone: 'warn', label: 'Signal lost' };
-  if (p.captured) return { tone: 'bad', label: 'Capture' };
-  if (!p.armed) return { tone: 'info', label: 'Arming…' };
+  if (s.captured) return { tone: 'bad', label: 'Capture' };
+  if (!isArmed(s)) return { tone: 'info', label: 'Arming…' };
   return { tone: 'ok', label: 'Armed' };
 }
 
 function renderHero() {
-  const views = [...sensors].map(([id, s]) => ({ id, s, ...sensorView(s) }));
+  const views = [...sensors.values()].map((s) => ({ s, ...sensorView(s) }));
   const worst = ['bad', 'warn', 'info'].map((t) => views.find((v) => v.tone === t)).find(Boolean);
   let tone = 'idle', title = 'Not listening', sub = 'Tap Start listening to connect to a sensor';
   if (worst) {
-    tone = worst.tone;
-    title = { bad: 'CAPTURE', warn: 'Signal lost', info: 'Arming…' }[worst.tone];
-    sub = worst.tone === 'bad' ? `Net ${worst.id} · peak ${worst.s.pkt.peak.toFixed(1)} m/s²`
-        : worst.tone === 'warn' ? `Net ${worst.id} has not been heard for ${Math.round((Date.now() - worst.s.seen) / 1000)} s`
-        : 'The sensor arms 30 s after power-up';
+    const { s } = worst; tone = worst.tone;
+    title = { bad: 'CAPTURE', warn: 'Signal lost', info: 'Arming…' }[tone];
+    sub = tone === 'bad' ? `Net ${s.id} · peak ${s.peak.toFixed(1)} m/s²`
+        : tone === 'warn' ? `Net ${s.id} has not been heard for ${Math.round((Date.now() - s.seen) / 1000)} s`
+        : `Net ${s.id} arms in ${Math.max(0, Math.ceil(ARM_DELAY_S - s.n / SAMPLE_HZ))} s`;
   } else if (views.length) {
     tone = 'ok'; title = 'All quiet'; sub = `${views.length} sensor${views.length > 1 ? 's' : ''} armed`;
   } else if (device) {
@@ -267,8 +273,7 @@ function renderHero() {
 }
 
 function renderLink() {
-  const up = device && device.gatt.connected;
-  const link = $('link');
+  const up = device && device.gatt.connected, link = $('link');
   link.className = 'pill ' + (up ? 'on' : reconnecting ? 'wait' : '');
   link.textContent = up ? 'Connected' : reconnecting ? 'Reconnecting…' : 'Not connected';
 }
@@ -281,12 +286,12 @@ function render() {
 
   const cards = $('cards');
   cards.textContent = '';
-  for (const [id, s] of [...sensors].sort((a, b) => a[0] - b[0])) {
-    const v = sensorView(s), p = s.pkt, age = Math.round((Date.now() - s.seen) / 1000);
+  for (const s of [...sensors.values()].sort((a, b) => a.id - b.id)) {
+    const v = sensorView(s), age = Math.round((Date.now() - s.seen) / 1000);
     const card = document.createElement('div');
     card.className = 'card ' + (v.tone === 'ok' ? '' : v.tone);
-    card.innerHTML = `<div class="card-head"><b>Net ${id}</b><span class="badge ${v.tone}">${v.label}</span></div>` +
-      `<div class="meta">Last reading ${age} s ago · captures ${p.captures}</div>`;
+    card.innerHTML = `<div class="card-head"><b>Net ${s.id}</b><span class="badge ${v.tone}">${v.label}</span></div>` +
+      `<div class="meta">Last reading ${age} s ago · captures ${s.captures}${s.dropped ? ' · ' + s.dropped + ' packets lost' : ''}</div>`;
     cards.appendChild(card);
     if (s.hist.length) {
       const c = document.createElement('canvas'); c.className = 'chart'; card.appendChild(c);
@@ -334,53 +339,31 @@ function drawChart(canvas, hist) {
   }
 }
 
-// ===== Sensitivity settings: saved on the phone, written to the sensor on every connect =====
+// ===== Sensitivity: kept on this phone, applied by the detector above =====
 function loadCfg() { try { return JSON.parse(localStorage.getItem('na-cfg')); } catch (e) { return null; } }
 function saveCfg(c) { try { localStorage.setItem('na-cfg', JSON.stringify(c)); } catch (e) { /* storage is optional */ } }
-function sliderCfg() { return { thr: parseFloat($('thr').value), dur: parseFloat($('dur').value) }; }
 
-function showCfg(thr, dur) {
-  threshold = thr;
+function applyCfg(thr, dur) {
+  threshold = thr; minSamples = Math.max(1, Math.round(dur * SAMPLE_HZ));
   $('thr').value = thr; $('dur').value = dur;
   $('thrval').textContent = thr.toFixed(1) + ' m/s²';
   $('durval').textContent = dur.toFixed(2) + ' s';
 }
-
-async function writeCfg() {
-  const { thr, dur } = sliderCfg();
-  if (!cfgChar || !device || !device.gatt.connected) { $('cfgstate').textContent = '· saved, applies when connected'; return; }
-  try {
-    await cfgChar.writeValue(new Uint8Array([Math.round(thr * 10), Math.round(dur * SAMPLE_HZ)]));
-    $('cfgstate').textContent = '· applied to sensor';
-    log(`sensitivity set: ${thr.toFixed(1)} m/s² for ${dur.toFixed(2)} s`);
-  } catch (e) { $('cfgstate').textContent = '· sensor refused: ' + e.message; }
-}
-
-let cfgTimer = null;
 function onSlide() {
-  const c = sliderCfg(); showCfg(c.thr, c.dur); saveCfg(c);
-  clearTimeout(cfgTimer); cfgTimer = setTimeout(writeCfg, 500);   // wait until the slider settles
-  render();
+  const c = { thr: parseFloat($('thr').value), dur: parseFloat($('dur').value) };
+  applyCfg(c.thr, c.dur); saveCfg(c); render();
 }
 $('thr').oninput = onSlide; $('dur').oninput = onSlide;
-{ const c = loadCfg() || DEFAULT_CFG; showCfg(c.thr, c.dur); }
+{ const c = loadCfg() || DEFAULT_CFG; applyCfg(c.thr, c.dur); }
 
 // ===== Bluetooth: connect, subscribe, reconnect =====
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function connect() {
   const server = await device.gatt.connect();
-  const svc = await server.getPrimaryService(SVC);
-  const chr = await svc.getCharacteristic(CHR);
+  const chr = await (await server.getPrimaryService(SVC)).getCharacteristic(CHR);
   chr.addEventListener('characteristicvaluechanged', (e) => { const p = parse(e.target.value); if (p) onPacket(p); });
   await chr.startNotifications();
-  const first = parse(await chr.readValue());
-  if (first) onPacket(first);
-
-  try { cfgChar = await svc.getCharacteristic(CFG); }
-  catch (e) { cfgChar = null; $('cfgstate').textContent = '· sensor firmware has no settings'; return; }
-  if (loadCfg()) await writeCfg();                           // the phone's saved setting wins
-  else { const v = await cfgChar.readValue(); showCfg(v.getUint8(0) / 10, v.getUint8(1) / SAMPLE_HZ); $('cfgstate').textContent = '· from sensor'; }
 }
 
 async function reconnectLoop() {
@@ -397,7 +380,7 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wakeLock) keepAwake(); });
 
 $('start').onclick = async () => {
-  unlockAudio(); keepAwake();
+  keepAwake();
   if (!navigator.bluetooth) { setMsg('This browser has no Bluetooth. On iPhone open this page in the Bluefy app.'); return; }
   try {
     device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'NetAlert' }], optionalServices: [SVC] });
@@ -412,18 +395,21 @@ $('start').onclick = async () => {
   }
 };
 
-// ===== Simulation: a sensor goes quiet, captures, then falls silent (exercises both alarms) =====
+// ===== Simulation: a sensor rests, gets shaken, rests, then falls silent (exercises both alarms) =====
 $('sim').onclick = () => {
-  unlockAudio();
   log('SIMULATION: no radio in use');
-  let beat = 0;
+  const s = getSensor(1);
+  s.n = Math.max(s.n, ARM_DELAY_S * SAMPLE_HZ - 2 * SAMPLE_HZ);   // skip most of the arming wait
+  let t = 0, seq = 0;
   const timer = setInterval(() => {
-    beat++;
-    const captured = beat >= 3 && beat <= 6;
-    onPacket({ id: 1, captured, armed: true, heartbeat: beat, captures: beat >= 3 ? 1 : 0, peak: captured ? 9.7 : 0,
-               activity: captured ? 6 + Math.random() * 4 : 0.05 + Math.random() * 0.1 });
-    if (beat === 8) clearInterval(timer);
-  }, 1000);
+    const samples = [];
+    for (let i = 0; i < SAMPLES_PER_PACKET; i++, t += 1 / SAMPLE_HZ) {
+      const shake = t >= 5 && t < 8 ? 4 * Math.sin(2 * Math.PI * 3 * t) : 0;          // 3 Hz shake for 3 s
+      samples.push([0.03 * Math.random() + shake, 0.03 * Math.random(), 9.8 + 0.03 * Math.random()]);
+    }
+    onPacket({ id: 1, seq: seq++ & 0xFF, samples });
+    if (t >= 11) clearInterval(timer);                                                // then go silent
+  }, 1000 * SAMPLES_PER_PACKET / SAMPLE_HZ);
 };
 
 render();
